@@ -633,8 +633,8 @@ parse_url_char(enum state s, const char ch)
 
 size_t http_parser_execute (http_parser *parser,
                             const http_parser_settings *settings,
-                            const char *data,
-                            size_t len)
+                            const char * const data,
+                            const size_t len)
 {
   char c, ch;
   int8_t unhex_val;
@@ -676,8 +676,9 @@ size_t http_parser_execute (http_parser *parser,
 
   if (CURRENT_STATE() == s_header_field)
     header_field_mark = data;
-  if (CURRENT_STATE() == s_header_value)
+  else if (CURRENT_STATE() == s_header_value)
     header_value_mark = data;
+
   switch (CURRENT_STATE()) {
   case s_req_path:
   case s_req_schema:

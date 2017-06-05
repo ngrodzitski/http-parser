@@ -391,8 +391,8 @@ void http_parser_settings_init(http_parser_settings *settings);
  * `parser->http_errno` on error. */
 size_t http_parser_execute(http_parser *parser,
                            const http_parser_settings *settings,
-                           const char *data,
-                           size_t len);
+                           const char * const data,
+                           const size_t len);
 
 
 /* If http_should_keep_alive() in the on_headers_complete or
