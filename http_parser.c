@@ -483,7 +483,7 @@ int http_message_needs_eof(const http_parser *parser);
  * assumed that the caller cares about (and can detect) the transition between
  * URL and non-URL states by looking for these.
  */
-static enum state
+static inline enum state
 parse_url_char(enum state s, const char ch)
 {
   if (ch == ' ' || ch == '\r' || ch == '\n') {
@@ -971,19 +971,27 @@ reexecute:
       case s_req_method:
       {
         const char *matcher;
+        const int parser_index = parser->index;
+        int cond1,cond2,cond3;
         if (UNLIKELY(ch == '\0')) {
           SET_ERRNO(HPE_INVALID_METHOD);
           goto error;
         }
 
         matcher = method_strings[parser->method];
-        if (ch == ' ' && matcher[parser->index] == '\0') {
-          UPDATE_STATE(s_req_spaces_before_url);
-        } else if (ch == matcher[parser->index]) {
-          ; /* nada */
-        } else if (IS_ALPHA(ch)) {
 
-          switch (parser->method << 16 | parser->index << 8 | ch) {
+        // Precalculate major cases independently:
+        cond1 = ch == ' ' && matcher[ parser_index ] == '\0';
+        cond2 = ch == matcher[ parser_index ];
+        cond3 = IS_ALPHA( ch );
+
+        if ( cond1 ) {
+          UPDATE_STATE(s_req_spaces_before_url);
+        } else if ( cond2 ) {
+          ; /* nada */
+        } else if ( cond3 ) {
+
+          switch (parser->method << 16 | parser_index << 8 | ch ) {
 #define XX(meth, pos, ch, new_meth) \
             case (HTTP_##meth << 16 | pos << 8 | ch): \
               parser->method = HTTP_##new_meth; break;
@@ -1098,9 +1106,18 @@ reexecute:
       }
 
       case s_req_http_start:
+
         switch (ch) {
           case 'H':
-            UPDATE_STATE(s_req_http_H);
+            if( (p + 4 < data + len) &&
+                p[1] == 'T' && p[2] == 'T' && p[3] == 'P' && p[4] == '/' )
+            {
+              p += 4;
+              COUNT_HEADER_SIZE(4);
+              UPDATE_STATE(s_req_http_major);
+            } else {
+              UPDATE_STATE(s_req_http_H);
+            }
             break;
           case ' ':
             break;
@@ -1243,112 +1260,139 @@ reexecute:
       case s_header_field:
       {
         const char* start = p;
-        for (; p != data + len; p++) {
-          ch = *p;
-          c = TOKEN(ch);
 
-          if (!c)
-            break;
+        if( parser->header_state == h_general )
+        {
+general_header_field_test_opt:
+          while ( p + 4 <= data + len ) {
+            ch = p[ 0 ]; if ( !TOKEN( ch ) ) { break; }
+            ch = p[ 1 ]; if ( !TOKEN( ch ) ) { p += 1; break; }
+            ch = p[ 2 ]; if ( !TOKEN( ch ) ) { p += 2; break; }
+            ch = p[ 3 ]; if ( !TOKEN( ch ) ) { p += 3; break; }
 
-          switch (parser->header_state) {
-            case h_general:
+            p += 4;
+          }
+
+          for (; p != data + len; p++) {
+            ch = *p;
+            c = TOKEN(ch);
+            if (!c)
+              break;
+          }
+        }
+        else
+        {
+          for (; p != data + len; p++) {
+            ch = *p;
+            c = TOKEN(ch);
+
+            if (!c)
               break;
 
-            case h_C:
-              parser->index++;
-              parser->header_state = (c == 'o' ? h_CO : h_general);
-              break;
+            if( parser->header_state == h_general )
+            {
+                p++;
+                goto general_header_field_test_opt;
+            }
 
-            case h_CO:
-              parser->index++;
-              parser->header_state = (c == 'n' ? h_CON : h_general);
-              break;
+            switch ( parser->header_state ) {
+              case h_C:
+                parser->index++;
+                parser->header_state = (c == 'o' ? h_CO : h_general);
+                break;
 
-            case h_CON:
-              parser->index++;
-              switch (c) {
-                case 'n':
-                  parser->header_state = h_matching_connection;
-                  break;
-                case 't':
-                  parser->header_state = h_matching_content_length;
-                  break;
-                default:
+              case h_CO:
+                parser->index++;
+                parser->header_state = (c == 'n' ? h_CON : h_general);
+                break;
+
+              case h_CON:
+                parser->index++;
+                switch (c) {
+                  case 'n':
+                    parser->header_state = h_matching_connection;
+                    break;
+                  case 't':
+                    parser->header_state = h_matching_content_length;
+                    break;
+                  default:
+                    parser->header_state = h_general;
+                    break;
+                }
+                break;
+
+              /* connection */
+
+              case h_matching_connection:
+                parser->index++;
+                if (parser->index > sizeof(CONNECTION)-1
+                    || c != CONNECTION[parser->index]) {
                   parser->header_state = h_general;
-                  break;
-              }
-              break;
+                } else if (parser->index == sizeof(CONNECTION)-2) {
+                  parser->header_state = h_connection;
+                }
+                break;
 
-            /* connection */
+              /* proxy-connection */
 
-            case h_matching_connection:
-              parser->index++;
-              if (parser->index > sizeof(CONNECTION)-1
-                  || c != CONNECTION[parser->index]) {
-                parser->header_state = h_general;
-              } else if (parser->index == sizeof(CONNECTION)-2) {
-                parser->header_state = h_connection;
-              }
-              break;
+              case h_matching_proxy_connection:
+                parser->index++;
+                if (parser->index > sizeof(PROXY_CONNECTION)-1
+                    || c != PROXY_CONNECTION[parser->index]) {
+                  parser->header_state = h_general;
+                } else if (parser->index == sizeof(PROXY_CONNECTION)-2) {
+                  parser->header_state = h_connection;
+                }
+                break;
 
-            /* proxy-connection */
+              /* content-length */
 
-            case h_matching_proxy_connection:
-              parser->index++;
-              if (parser->index > sizeof(PROXY_CONNECTION)-1
-                  || c != PROXY_CONNECTION[parser->index]) {
-                parser->header_state = h_general;
-              } else if (parser->index == sizeof(PROXY_CONNECTION)-2) {
-                parser->header_state = h_connection;
-              }
-              break;
+              case h_matching_content_length:
+                parser->index++;
+                if (parser->index > sizeof(CONTENT_LENGTH)-1
+                    || c != CONTENT_LENGTH[parser->index]) {
+                  parser->header_state = h_general;
+                } else if (parser->index == sizeof(CONTENT_LENGTH)-2) {
+                  parser->header_state = h_content_length;
+                }
+                break;
 
-            /* content-length */
+              /* transfer-encoding */
 
-            case h_matching_content_length:
-              parser->index++;
-              if (parser->index > sizeof(CONTENT_LENGTH)-1
-                  || c != CONTENT_LENGTH[parser->index]) {
-                parser->header_state = h_general;
-              } else if (parser->index == sizeof(CONTENT_LENGTH)-2) {
-                parser->header_state = h_content_length;
-              }
-              break;
+              case h_matching_transfer_encoding:
+                parser->index++;
+                if (parser->index > sizeof(TRANSFER_ENCODING)-1
+                    || c != TRANSFER_ENCODING[parser->index]) {
+                  parser->header_state = h_general;
+                } else if (parser->index == sizeof(TRANSFER_ENCODING)-2) {
+                  parser->header_state = h_transfer_encoding;
+                }
+                break;
 
-            /* transfer-encoding */
+              /* upgrade */
 
-            case h_matching_transfer_encoding:
-              parser->index++;
-              if (parser->index > sizeof(TRANSFER_ENCODING)-1
-                  || c != TRANSFER_ENCODING[parser->index]) {
-                parser->header_state = h_general;
-              } else if (parser->index == sizeof(TRANSFER_ENCODING)-2) {
-                parser->header_state = h_transfer_encoding;
-              }
-              break;
+              case h_matching_upgrade:
+                parser->index++;
+                if (parser->index > sizeof(UPGRADE)-1
+                    || c != UPGRADE[parser->index]) {
+                  parser->header_state = h_general;
+                } else if (parser->index == sizeof(UPGRADE)-2) {
+                  parser->header_state = h_upgrade;
+                }
+                break;
 
-            /* upgrade */
+              case h_connection:
+              case h_content_length:
+              case h_transfer_encoding:
+              case h_upgrade:
+                if (ch != ' ') parser->header_state = h_general;
+                break;
 
-            case h_matching_upgrade:
-              parser->index++;
-              if (parser->index > sizeof(UPGRADE)-1
-                  || c != UPGRADE[parser->index]) {
-                parser->header_state = h_general;
-              } else if (parser->index == sizeof(UPGRADE)-2) {
-                parser->header_state = h_upgrade;
-              }
-              break;
+              default:
+                assert(0 && "Unknown header_state");
+                break;
+            }
 
-            case h_connection:
-            case h_content_length:
-            case h_transfer_encoding:
-            case h_upgrade:
-              if (ch != ' ') parser->header_state = h_general;
-              break;
-
-            default:
-              assert(0 && "Unknown header_state");
-              break;
           }
         }
 
